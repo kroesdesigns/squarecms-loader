@@ -1,0 +1,27 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - run: npm install
+      - run: npm run check && npm run build
+      - name: Publish to the release branch
+        run: |
+          git config user.name "squarecms-release"
+          git config user.email "release@users.noreply.github.com"
+          mkdir -p /tmp/rel && cp os-cms-loader.js os-cms-loader.min.js /tmp/rel/
+          git checkout -B release
+          git rm -rfq . || true
+          cp /tmp/rel/* .
+          echo "${GITHUB_REF_NAME}" > VERSION
+          git add -A
+          git commit -m "release ${GITHUB_REF_NAME}" || echo "nothing to commit"
+          git push -f origin release
