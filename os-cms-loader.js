@@ -45,6 +45,16 @@
   /* ====================================================================
    * 02. Shared helpers
    * ================================================================== */
+  /** Status stamp Studio reads from <html data-oscms-status> — what mode the
+   *  loader is in on this page, which item _xx resolved to, how much it did. */
+  var statusCounts = { replaced: 0 };
+  function stampStatus(doc, mode, extra) {
+    try {
+      var o = { mode: mode, index: window.APS_PAGE_INDEX || null, replaced: statusCounts.replaced, unknown: (window.__osCMSUnknownTags || []).length, data: !!window.__osCMSData, at: Date.now() };
+      if (extra) for (var k in extra) o[k] = extra[k];
+      (doc || document).documentElement.setAttribute("data-oscms-status", JSON.stringify(o));
+    } catch (e) {}
+  }
   function log() {
     try {
       if (window.osCMSDebug || (window.top && window.top.osCMSDebug)) {
@@ -663,7 +673,7 @@
         var n = processTextNodes(root);
         processAttributes(root && root.nodeType === 1 ? root : doc);
         processToggles(root && root.nodeType === 1 ? root : doc);
-        if (n) log("replaced tags in " + n + " text node(s)");
+        if (n) { statusCounts.replaced += n; log("replaced tags in " + n + " text node(s)"); }
       } catch (e) {
         log("replace failed:", e);
       }
@@ -852,6 +862,7 @@
           }
           lastView = view;
         }
+        stampStatus(document, "live", { hasData: !!data });
         try {
           document.documentElement.classList.remove("oscms-cloak");
         } catch (e) {}
@@ -1185,6 +1196,7 @@
           replacer.restore(); // raw tags back BEFORE any serialization
           refreshHighlights(pillMap);
           log("edit mode — raw tags restored, pills on");
+          stampStatus(P, "edit");
         } else {
           clearHighlights(P);
           deriveIndexFromMap(scopedMap);
@@ -1192,6 +1204,7 @@
           replacer.run();
           afterRun();
           log("preview mode — values shown");
+          stampStatus(P, "preview");
         }
         scanUnknown();
         return;
@@ -1206,6 +1219,7 @@
           replacer.run();
           afterRun();
           log("draft changed — preview refreshed");
+          stampStatus(P, "preview");
         }
         scanUnknown();
         return;
@@ -1214,6 +1228,7 @@
       if (mode === "edit") refreshHighlights(pillMap);
       else { replacer.run(); afterRun(); }
       scanUnknown();
+      stampStatus(P, mode);
     }
 
     sync();
