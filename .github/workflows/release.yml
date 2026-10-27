@@ -1,7 +1,14 @@
+# Deploy = push to main. Every push builds the minified loader, publishes it to
+# the `release` branch, and purges the jsDelivr cache, so every client site
+# running the one-line tag
+#   https://cdn.jsdelivr.net/gh/OWNER/REPO@release/os-cms-loader.min.js
+# is on the new build within a minute or two. No tags, no version numbers:
+# it's all "v1", and the build is stamped with the commit that made it.
 name: release
 on:
   push:
-    tags: ["v*"]
+    branches: ["main"]
+  workflow_dispatch:
 permissions:
   contents: write
 jobs:
@@ -12,6 +19,11 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
       - run: npm install
+      - name: Stamp the build
+        run: |
+          BUILD="${GITHUB_SHA::7}-$(date -u +%Y%m%d)"
+          sed -i "s/__BUILD__/${BUILD}/g" os-cms-loader.js
+          echo "BUILD=${BUILD}" >> "$GITHUB_ENV"
       - run: npm run check && npm run build
       - name: Publish to the release branch
         run: |
@@ -21,7 +33,12 @@ jobs:
           git checkout -B release
           git rm -rfq . || true
           cp /tmp/rel/* .
-          echo "${GITHUB_REF_NAME}" > VERSION
+          echo "${BUILD}" > VERSION
           git add -A
-          git commit -m "release ${GITHUB_REF_NAME}" || echo "nothing to commit"
+          git commit -m "release ${BUILD}" || echo "nothing to commit"
           git push -f origin release
+      - name: Purge the jsDelivr cache
+        run: |
+          sleep 10
+          curl -fsS "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@release/os-cms-loader.min.js" || true
+          curl -fsS "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@release/os-cms-loader.js" || true
