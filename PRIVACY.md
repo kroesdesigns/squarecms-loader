@@ -1,8 +1,8 @@
-# SquareCMS Studio — Privacy Policy
+# SquareCMS — Privacy Policy
 
 _Last updated: October 26, 2026_
 
-SquareCMS Studio is a Chrome extension that lets owners, admins and editors of a Squarespace website edit the site's SquareCMS content (text, links and image URLs stored in the site's own footer code injection) from a floating panel, and publish those changes to the site.
+SquareCMS is a Chrome extension that lets owners, admins and editors of a Squarespace website edit the site's SquareCMS content (text, links and image URLs stored in the site's own footer code injection) from a floating panel, and publish those changes to the site.
 
 ## What the extension accesses
 
