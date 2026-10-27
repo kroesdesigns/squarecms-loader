@@ -1,4 +1,4 @@
-/* osCMS loader — 1.0.1 (runtime only; was "v58")
+/* osCMS loader — v1 (runtime only; was "v58"). Build: __BUILD__
  *
  * The live-site half of SquareCMS. Everything an editor needs now lives in
  * the SquareCMS Studio Chrome extension, so this file is just:
@@ -26,8 +26,9 @@
    * ================================================================== */
   var APP = "osCMS";
   var DATA_GLOBAL = "__osCMSData";
-  var LOADER_VERSION = "1.0.1"; // keep in step with the git tag (v1.0.0)
-  try { document.documentElement.setAttribute("data-oscms-loader", LOADER_VERSION); } catch (eV) {}
+  var LOADER_VERSION = "1";          // one major line — every site loads @release and stays current
+  var LOADER_BUILD = "__BUILD__";    // replaced by the GitHub Action with the commit that built this file
+  try { document.documentElement.setAttribute("data-oscms-loader", LOADER_VERSION); document.documentElement.setAttribute("data-oscms-build", LOADER_BUILD); } catch (eV) {}
   var MARKER_ID = "OSCMS:data";
   var MARKER_OPEN = "<!-- ==== " + MARKER_ID + " \u00b7 Site CMS Data ==== -->";
   var MARKER_CLOSE = "<!-- ==== /" + MARKER_ID + " ==== -->";
@@ -717,7 +718,7 @@
           deriveIndexFromMap(liveMap);
           replacer.setMap(liveMap);
           if (view === "tags") {
-            // Studio asked for the source view: raw tags, colour-coded
+            // Studio asked for the source view: raw tags, color-coded
             clearValueSpots(document);
             replacer.restore();
             injectHighlightStyles(document);
@@ -757,7 +758,7 @@
    *   <html data-oscms-view="values|highlight|tags">
    *   values    → what visitors see (default)
    *   highlight → values stay, every CMS-driven word/image/link is tinted
-   *   tags      → the raw {{tags}} in place, colour-coded by field type
+   *   tags      → the raw {{tags}} in place, color-coded by field type
    * ================================================================== */
   function pageView(doc) {
     var v = doc.documentElement.getAttribute("data-oscms-view");
@@ -1053,7 +1054,7 @@
     function sync() {
       var changed = refreshData();
       // Studio's "tags" page view behaves exactly like Squarespace's block
-      // edit mode: raw tags in the DOM, painted as colour-coded pills.
+      // edit mode: raw tags in the DOM, painted as color-coded pills.
       var next = isEditModeBody() || pageView(P) === "tags" ? "edit" : "preview";
       if (next !== mode) {
         mode = next;
