@@ -1,10 +1,11 @@
-/* osCMS loader — 1.0.0 (runtime only; was "v58")
+/* osCMS loader — 1.0.1 (runtime only; was "v58")
  *
  * The live-site half of SquareCMS. Everything an editor needs now lives in
  * the SquareCMS Studio Chrome extension, so this file is just:
  *
  *   01. Config & constants
  *   02. Shared helpers (slugify, normalization, tag map)
+ *   04.5 Page views (data-oscms-view: values | highlight | tags) — set by Studio
  *   03. Replacement engine (text nodes + attributes, record/restore)
  *   04. LIVE SITE boot (immediate pass + MutationObserver + mercury:load)
  *   05. Editor gate (top-window /config check)
@@ -25,7 +26,7 @@
    * ================================================================== */
   var APP = "osCMS";
   var DATA_GLOBAL = "__osCMSData";
-  var LOADER_VERSION = "1.0.0"; // keep in step with the git tag (v1.0.0)
+  var LOADER_VERSION = "1.0.1"; // keep in step with the git tag (v1.0.0)
   try { document.documentElement.setAttribute("data-oscms-loader", LOADER_VERSION); } catch (eV) {}
   var MARKER_ID = "OSCMS:data";
   var MARKER_OPEN = "<!-- ==== " + MARKER_ID + " \u00b7 Site CMS Data ==== -->";
@@ -589,7 +590,49 @@
       attrLog = [];
     }
 
-    return { setMap: setMap, run: run, restore: restore };
+    /** Where the swapped VALUES sit right now — for the "highlight" page view.
+     *  Text: [start,end) ranges inside recorded text nodes, derived from the
+     *  original string + the current map (verified against the live text).
+     *  Elements: anchors we created, and img/a whose attributes we swapped. */
+    function valueSpots() {
+      var ranges = [], els = [];
+      textLog.forEach(function (t) {
+        var node = t.node;
+        if (!node || !node.isConnected) return;
+        var out = 0, prev = 0, re = tagRe(), m, orig = t.original;
+        while ((m = re.exec(orig))) {
+          var e = map[m[1]];
+          if (!e) continue;
+          out += m.index - prev;
+          var v = String(e.value || "");
+          if (node.nodeValue.substr(out, v.length) === v && v.length) ranges.push({ node: node, start: out, end: out + v.length, type: e.type, key: m[1] });
+          out += v.length;
+          prev = m.index + m[0].length;
+        }
+      });
+      wrapLog.forEach(function (w) {
+        w.inserted.forEach(function (n) {
+          if (!n.isConnected) return;
+          if (n.nodeType === 1 && n.classList && n.classList.contains("oscms-a")) els.push({ el: n, type: "link" });
+          else if (n.nodeType === 3) {
+            for (var k in map) {
+              if (!Object.prototype.hasOwnProperty.call(map, k)) continue;
+              var v2 = String(map[k].value || ""); if (v2.length < 2) continue;
+              var at = n.nodeValue.indexOf(v2);
+              if (at !== -1) ranges.push({ node: n, start: at, end: at + v2.length, type: map[k].type, key: k });
+            }
+          }
+        });
+      });
+      attrLog.forEach(function (a) {
+        if (!a.el || !a.el.isConnected) return;
+        if (a.attr === "src" || a.attr === "data-src" || a.attr === "data-image") els.push({ el: a.el, type: "image" });
+        else if (a.attr === "href") els.push({ el: a.el, type: "link" });
+      });
+      return { ranges: ranges, els: els };
+    }
+
+    return { setMap: setMap, run: run, restore: restore, getMap: function () { return map; }, valueSpots: valueSpots };
   }
 
   /** Debounced observer that re-runs `fn` whenever Squarespace renders. */
@@ -664,20 +707,35 @@
         // next sync writes a data-only block and it disappears entirely.
         log("legacy inline runtime detected — loader taking over");
       }
-      var replacer = createReplacer(document, { record: false });
+      var replacer = createReplacer(document, { record: true });
+      var lastView = null;
       var run = function () {
         var data = window[DATA_GLOBAL];
+        var view = pageView(document);
         if (data) {
           var liveMap = buildTagMap(data, location.pathname);
           deriveIndexFromMap(liveMap);
           replacer.setMap(liveMap);
-          replacer.run();
+          if (view === "tags") {
+            // Studio asked for the source view: raw tags, colour-coded
+            clearValueSpots(document);
+            replacer.restore();
+            injectHighlightStyles(document);
+            refreshHighlights(liveMap, document);
+          } else {
+            if (lastView === "tags") clearHighlights(document);
+            replacer.run();
+            if (view === "highlight") { injectHighlightStyles(document); paintValueSpots(document, replacer); }
+            else if (lastView === "highlight") clearValueSpots(document);
+          }
+          lastView = view;
         }
         try {
           document.documentElement.classList.remove("oscms-cloak");
         } catch (e) {}
       };
       run();
+      observeView(document, run);
       if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", run, { once: true });
       }
@@ -694,6 +752,48 @@
         );
     }, 0);
   }
+  /* ====================================================================
+   * 04.5 Page views — driven by SquareCMS Studio through one attribute:
+   *   <html data-oscms-view="values|highlight|tags">
+   *   values    → what visitors see (default)
+   *   highlight → values stay, every CMS-driven word/image/link is tinted
+   *   tags      → the raw {{tags}} in place, colour-coded by field type
+   * ================================================================== */
+  function pageView(doc) {
+    var v = doc.documentElement.getAttribute("data-oscms-view");
+    return v === "highlight" || v === "tags" ? v : "values";
+  }
+  function observeView(doc, fn) {
+    try {
+      new MutationObserver(fn).observe(doc.documentElement, { attributes: true, attributeFilter: ["data-oscms-view"] });
+    } catch (e) {}
+  }
+  var decorated = [];
+  function paintValueSpots(doc, replacer) {
+    clearValueSpots(doc);
+    var spots = replacer.valueSpots();
+    if (highlightsSupported()) {
+      var groups = { text: [], link: [], image: [] };
+      spots.ranges.forEach(function (r) {
+        try { var rg = doc.createRange(); rg.setStart(r.node, r.start); rg.setEnd(r.node, r.end); (groups[r.type] || groups.text).push(rg); } catch (e) {}
+      });
+      ["text", "link", "image"].forEach(function (g) {
+        try {
+          if (groups[g].length) { var hl = new Highlight(); groups[g].forEach(function (r) { hl.add(r); }); CSS.highlights.set("oscms-" + g, hl); }
+          else CSS.highlights.delete("oscms-" + g);
+        } catch (e) {}
+      });
+    }
+    spots.els.forEach(function (x) {
+      try { x.el.classList.add(x.type === "image" ? "oscms-hl-img" : "oscms-hl-a"); decorated.push(x.el); } catch (e) {}
+    });
+  }
+  function clearValueSpots(doc) {
+    clearHighlights(doc);
+    decorated.forEach(function (el) { try { el.classList.remove("oscms-hl-img", "oscms-hl-a"); } catch (e) {} });
+    decorated = [];
+  }
+
   /* ====================================================================
    * 05. Editor gate
    * ================================================================== */
@@ -743,7 +843,9 @@
     "::highlight(oscms-link){background-color:#ede9fe;color:#6d28d9}" +
     "::highlight(oscms-image){background-color:#fef3c7;color:#92400e}" +
     "::highlight(oscms-unknown){background-color:#fee2e2;color:#b91c1c}" +
-    "::highlight(oscms-global){background-color:#d9f74e;color:#3f4410}";
+    "::highlight(oscms-global){background-color:#d9f74e;color:#3f4410}" +
+    ".oscms-hl-img{outline:3px solid #d97706!important;outline-offset:3px;border-radius:4px}" +
+    ".oscms-hl-a{outline:2px solid #7c3aed!important;outline-offset:2px;border-radius:3px}";
 
   function highlightsSupported() {
     try {
@@ -753,16 +855,18 @@
     }
   }
 
-  function injectHighlightStyles() {
-    if (P.getElementById("oscms-hl-styles")) return;
-    var s = P.createElement("style");
+  function injectHighlightStyles(doc) {
+    doc = doc || P;
+    if (doc.getElementById("oscms-hl-styles")) return;
+    var s = doc.createElement("style");
     s.id = "oscms-hl-styles";
     s.textContent = HIGHLIGHT_CSS;
-    (P.head || P.documentElement).appendChild(s);
+    (doc.head || doc.documentElement).appendChild(s);
   }
 
-  function refreshHighlights(map) {
-    if (!highlightsSupported() || !P.body) return;
+  function refreshHighlights(map, doc) {
+    var P = doc || window.__osCMSPreviewDoc;
+    if (!highlightsSupported() || !P || !P.body) return;
     var groups = { text: [], link: [], image: [], unknown: [], global: [] };
     var walker = P.createTreeWalker(P.body, NodeFilter.SHOW_TEXT, {
       acceptNode: function (node) {
@@ -801,7 +905,7 @@
     });
   }
 
-  function clearHighlights() {
+  function clearHighlights(doc) {
     if (!highlightsSupported()) return;
     ["text", "link", "image", "unknown", "global"].forEach(function (g) {
       try {
@@ -811,7 +915,8 @@
   }
 
   function bootEditorPreview() {
-    injectHighlightStyles();
+    window.__osCMSPreviewDoc = P;
+    injectHighlightStyles(P);
     var replacer = createReplacer(P, { record: true });
 
     /* Preview renders the DRAFT (top localStorage) so widget edits show up
@@ -938,20 +1043,31 @@
       window.__osCMSUnknownSpots = spots;
     }
 
+    var lastView = null;
+    function afterRun() {
+      // "highlight" page view: tint the swapped values in place
+      if (pageView(P) === "highlight") paintValueSpots(P, replacer);
+      else if (lastView === "highlight") clearValueSpots(P);
+      lastView = pageView(P);
+    }
     function sync() {
       var changed = refreshData();
-      var next = isEditModeBody() ? "edit" : "preview";
+      // Studio's "tags" page view behaves exactly like Squarespace's block
+      // edit mode: raw tags in the DOM, painted as colour-coded pills.
+      var next = isEditModeBody() || pageView(P) === "tags" ? "edit" : "preview";
       if (next !== mode) {
         mode = next;
         if (mode === "edit") {
+          clearValueSpots(P);
           replacer.restore(); // raw tags back BEFORE any serialization
           refreshHighlights(pillMap);
           log("edit mode — raw tags restored, pills on");
         } else {
-          clearHighlights();
+          clearHighlights(P);
           deriveIndexFromMap(scopedMap);
           replacer.setMap(scopedMap);
           replacer.run();
+          afterRun();
           log("preview mode — values shown");
         }
         scanUnknown();
@@ -965,6 +1081,7 @@
           deriveIndexFromMap(scopedMap);
           replacer.setMap(scopedMap);
           replacer.run();
+          afterRun();
           log("draft changed — preview refreshed");
         }
         scanUnknown();
@@ -972,11 +1089,12 @@
       }
       // steady-state upkeep as Squarespace re-renders
       if (mode === "edit") refreshHighlights(pillMap);
-      else replacer.run();
+      else { replacer.run(); afterRun(); }
       scanUnknown();
     }
 
     sync();
+    observeView(P, sync);
     observeRenders(P, sync);
     if (typeof MutationObserver !== "undefined" && P.body) {
       new MutationObserver(sync).observe(P.body, {
