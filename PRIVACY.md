@@ -24,7 +24,7 @@ SquareCMS Studio is a Chrome extension that lets owners, admins and editors of a
 
 | Permission | Why |
 |---|---|
-| `activeTab`, `tabs`, `scripting` | Open the panel on the tab you click, open the Code Injection tab to publish, and write into Squarespace's code editor on that tab. |
+| `activeTab`, `scripting` | Open the panel on the tab you click, open the Code Injection tab to publish, and write into Squarespace's code editor on that tab. |
 | `storage` | Keep your draft and settings on your computer. |
 | Access to all websites (`<all_urls>`) | Squarespace sites live on any custom domain, so the extension cannot know the list of sites in advance. It only acts on a page when you open the panel on it. |
 
