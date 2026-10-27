@@ -35,7 +35,7 @@
   var STORE_KEY = "osCMSEditor";
   var STORE_VERSION = 4;
   var LINK_KINDS = ["url", "phone", "email"];
-  var FIELD_TYPES = ["text", "link", "image"];
+  var FIELD_TYPES = ["text", "link", "image", "rich", "number", "date", "toggle"];
 
   function tagRe() {
     // fresh instance each use — global regexes carry lastIndex state
@@ -86,7 +86,11 @@
           .filter(Boolean),
         fields: (c.fields || []).map(function (f) {
           if (typeof f === "string") return { name: f, type: "text" };
-          return { name: f.name, type: FIELD_TYPES.indexOf(f.type) !== -1 ? f.type : "text" };
+          var nf = { name: f.name, type: FIELD_TYPES.indexOf(f.type) !== -1 ? f.type : "text" };
+          if (f.format) nf.format = String(f.format);
+          if (f.decimals != null && f.decimals !== "") nf.decimals = f.decimals;
+          if (f.currency) nf.currency = String(f.currency);
+          return nf;
         }),
         items: (c.items || []).map(function (it) {
           return { values: (it && it.values) || {} };
@@ -142,6 +146,100 @@
    *   text/image: { value, type }
    *   link:       { value: display text, type, href, nt }
    */
+  /* ====================================================================
+   * Field display — rich / number / date / toggle. Shared with Studio
+   * (lib/core.js carries the same function); keep the two in step.
+   * ================================================================== */
+  var RICH_TAGS = { B: 1, STRONG: 1, I: 1, EM: 1, U: 1, A: 1, BR: 1, P: 1, UL: 1, OL: 1, LI: 1, S: 1 };
+  function sanitizeRich(html) {
+    try {
+      var box = document.implementation.createHTMLDocument("").createElement("div");
+      box.innerHTML = String(html == null ? "" : html);
+      (function walk(el) {
+        var kids = [].slice.call(el.childNodes);
+        for (var i = 0; i < kids.length; i++) {
+          var k = kids[i];
+          if (k.nodeType === 8) { el.removeChild(k); continue; }
+          if (k.nodeType !== 1) continue;
+          if (!RICH_TAGS[k.tagName]) { // unwrap unknown elements, keep their text
+            while (k.firstChild) el.insertBefore(k.firstChild, k);
+            el.removeChild(k); continue;
+          }
+          var attrs = [].slice.call(k.attributes);
+          for (var a = 0; a < attrs.length; a++) {
+            var an = attrs[a].name.toLowerCase();
+            if (k.tagName === "A" && (an === "href" || an === "target")) {
+              if (an === "href" && /^\s*javascript:/i.test(attrs[a].value)) k.removeAttribute(an);
+              continue;
+            }
+            k.removeAttribute(attrs[a].name);
+          }
+          if (k.tagName === "A" && k.getAttribute("target") === "_blank") k.setAttribute("rel", "noopener");
+          walk(k);
+        }
+      })(box);
+      return box.innerHTML;
+    } catch (e) { return String(html == null ? "" : html).replace(/<[^>]*>/g, ""); }
+  }
+  function richToText(html) {
+    return String(html == null ? "" : html).replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|li|div)>/gi, "\n").replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/\n{2,}/g, "\n").trim();
+  }
+  function toggleOn(raw) {
+    if (typeof raw === "boolean") return raw;
+    if (raw == null) return false;
+    var s = String(typeof raw === "object" ? raw.v : raw).trim().toLowerCase();
+    return s === "true" || s === "1" || s === "yes" || s === "on" || s === "y";
+  }
+  function formatNumber(raw, f) {
+    var s = String(raw == null ? "" : typeof raw === "object" ? raw.v : raw).trim();
+    if (s === "") return "";
+    var n = Number(s.replace(/[^0-9.+-]/g, ""));
+    if (!isFinite(n)) return s;
+    var style = (f && f.format) || "plain", dec = f && f.decimals != null && f.decimals !== "" ? parseInt(f.decimals, 10) : null;
+    var o = {};
+    if (dec != null && !isNaN(dec)) { o.minimumFractionDigits = dec; o.maximumFractionDigits = dec; }
+    try {
+      if (style === "currency") { o.style = "currency"; o.currency = (f && f.currency) || "USD"; if (dec == null) { o.minimumFractionDigits = 0; o.maximumFractionDigits = 2; } return new Intl.NumberFormat("en-US", o).format(n); }
+      if (style === "percent") { if (dec == null) o.maximumFractionDigits = 2; return new Intl.NumberFormat("en-US", o).format(n) + "%"; }
+      if (style === "comma") { if (dec == null) o.maximumFractionDigits = 4; return new Intl.NumberFormat("en-US", o).format(n); }
+      if (dec != null && !isNaN(dec)) return n.toFixed(dec);
+    } catch (e) {}
+    return String(n);
+  }
+  var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  var DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  function parseDateRaw(raw) {
+    var s = String(raw == null ? "" : typeof raw === "object" ? raw.v : raw).trim();
+    var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+    if (m) return new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+    var d = new Date(s); return isNaN(d.getTime()) ? null : d;
+  }
+  function formatDate(raw, f) {
+    var s = String(raw == null ? "" : typeof raw === "object" ? raw.v : raw).trim();
+    if (!s) return "";
+    var d = parseDateRaw(s); if (!d) return s;
+    var style = (f && f.format) || "medium";
+    var M = MONTHS[d.getMonth()], D = d.getDate(), Y = d.getFullYear();
+    switch (style) {
+      case "long": return M + " " + D + ", " + Y;
+      case "short": return (d.getMonth() + 1) + "/" + D + "/" + Y;
+      case "iso": return Y + "-" + ("0" + (d.getMonth() + 1)).slice(-2) + "-" + ("0" + D).slice(-2);
+      case "monthYear": return M + " " + Y;
+      case "weekday": return DAYS[d.getDay()] + ", " + M + " " + D + ", " + Y;
+      case "day": return M.slice(0, 3) + " " + D;
+      default: return M.slice(0, 3) + " " + D + ", " + Y;
+    }
+  }
+  /** Map entry for a non-link field: { value (display text), type, html?, on? }. */
+  function fieldEntry(f, raw) {
+    var t = f.type;
+    if (t === "rich") { var h = sanitizeRich(typeof raw === "object" && raw ? raw.v : raw); return { value: richToText(h), html: h, type: "rich" }; }
+    if (t === "number") return { value: formatNumber(raw, f), type: "number" };
+    if (t === "date") return { value: formatDate(raw, f), type: "date" };
+    if (t === "toggle") { var on = toggleOn(raw); return { value: on ? "Yes" : "No", on: on, type: "toggle" }; }
+    return { value: typeof raw === "string" ? raw : raw == null ? "" : String(raw.v == null ? "" : raw.v), type: t };
+  }
+
   function buildTagMap(data, pathname) {
     var map = {};
     if (!data) return map;
@@ -155,11 +253,7 @@
             var l = normLink(item.values[f.name]);
             map[key] = { value: l.label || l.v, type: "link", href: linkHref(l), nt: l.nt };
           } else {
-            var raw = item.values[f.name];
-            map[key] = {
-              value: typeof raw === "string" ? raw : raw == null ? "" : String(raw.v || ""),
-              type: f.type,
-            };
+            map[key] = fieldEntry(f, item.values[f.name]);
           }
         });
       });
@@ -321,7 +415,7 @@
       var m;
       while ((m = re.exec(str))) {
         var e = map[m[1]];
-        if (e && e.type === "link") return true;
+        if (e && (e.type === "link" || (e.type === "rich" && e.html))) return true;
       }
       return false;
     }
@@ -359,6 +453,12 @@
           }
           a.textContent = e.value;
           frag.appendChild(a);
+        } else if (e.type === "rich" && e.html) {
+          // formatted value: a span carrying the sanitized HTML (bold, links, breaks, lists)
+          var sp = doc.createElement("span");
+          sp.className = "oscms-rich";
+          sp.innerHTML = e.html;
+          frag.appendChild(sp);
         } else {
           frag.appendChild(doc.createTextNode(e.value));
         }
@@ -368,6 +468,23 @@
       var inserted = [].slice.call(frag.childNodes);
       node.parentNode.replaceChild(frag, node);
       if (record) wrapLog.push({ inserted: inserted, original: node });
+    }
+
+    /** data-oscms-show="{{slug.field_N}}" hides the element while the toggle
+     *  is off; data-oscms-hide does the opposite. Works inside repeaters
+     *  (the _i index is rewritten with the rest of the template). */
+    function processToggles(scope) {
+      var els = scope.querySelectorAll ? scope.querySelectorAll("[data-oscms-show],[data-oscms-hide]") : [];
+      for (var i = 0; i < els.length; i++) {
+        var el = els[i], show = el.hasAttribute("data-oscms-show");
+        var key = firstTagIn(el.getAttribute(show ? "data-oscms-show" : "data-oscms-hide") || "");
+        var e = key && map[key];
+        if (!e || e.type !== "toggle") continue;
+        var hide = show ? !e.on : !!e.on;
+        var cur = el.getAttribute("data-oscms-hidden");
+        if (hide && cur !== "1") { recordAttr(el, "hidden"); recordAttr(el, "data-oscms-hidden"); el.setAttribute("hidden", ""); el.setAttribute("data-oscms-hidden", "1"); }
+        else if (!hide && cur === "1") { el.removeAttribute("hidden"); el.removeAttribute("data-oscms-hidden"); }
+      }
     }
 
     function recordAttr(el, attr) {
@@ -545,6 +662,7 @@
         rewritePageIndex(scope);
         var n = processTextNodes(root);
         processAttributes(root && root.nodeType === 1 ? root : doc);
+        processToggles(root && root.nodeType === 1 ? root : doc);
         if (n) log("replaced tags in " + n + " text node(s)");
       } catch (e) {
         log("replace failed:", e);
@@ -615,6 +733,7 @@
         w.inserted.forEach(function (n) {
           if (!n.isConnected) return;
           if (n.nodeType === 1 && n.classList && n.classList.contains("oscms-a")) els.push({ el: n, type: "link" });
+          else if (n.nodeType === 1 && n.classList && n.classList.contains("oscms-rich")) els.push({ el: n, type: "text" });
           else if (n.nodeType === 3) {
             for (var k in map) {
               if (!Object.prototype.hasOwnProperty.call(map, k)) continue;
@@ -786,12 +905,12 @@
       });
     }
     spots.els.forEach(function (x) {
-      try { x.el.classList.add(x.type === "image" ? "oscms-hl-img" : "oscms-hl-a"); decorated.push(x.el); } catch (e) {}
+      try { x.el.classList.add(x.type === "image" ? "oscms-hl-img" : x.type === "text" ? "oscms-hl-rich" : "oscms-hl-a"); decorated.push(x.el); } catch (e) {}
     });
   }
   function clearValueSpots(doc) {
     clearHighlights(doc);
-    decorated.forEach(function (el) { try { el.classList.remove("oscms-hl-img", "oscms-hl-a"); } catch (e) {} });
+    decorated.forEach(function (el) { try { el.classList.remove("oscms-hl-img", "oscms-hl-a", "oscms-hl-rich"); } catch (e) {} });
     decorated = [];
   }
 
@@ -841,6 +960,7 @@
 
   var HIGHLIGHT_CSS =
     "::highlight(oscms-text){background-color:#dbeafe;color:#1e40af}" +
+    ".oscms-hl-rich{outline:2px solid #3b7ee0;outline-offset:1px;border-radius:2px;background:#dbeafe}" +
     "::highlight(oscms-link){background-color:#ede9fe;color:#6d28d9}" +
     "::highlight(oscms-image){background-color:#fef3c7;color:#92400e}" +
     "::highlight(oscms-unknown){background-color:#fee2e2;color:#b91c1c}" +
@@ -886,7 +1006,7 @@
           r.setStart(node, m.index);
           r.setEnd(node, m.index + m[0].length);
           var entry = map[m[1]];
-          var g = entry ? entry.type : /_(?:xx|i)$/i.test(m[1]) ? "global" : "unknown";
+          var g = entry ? (entry.type === "link" || entry.type === "image" ? entry.type : "text") : /_(?:xx|i)$/i.test(m[1]) ? "global" : "unknown";
           groups[g].push(r);
         } catch (e) {}
       }
