@@ -787,10 +787,12 @@
       var best = null; // { index, own }
       for (var mk in map) {
         if (!Object.prototype.hasOwnProperty.call(map, mk)) continue;
-        var pm = /^([a-z0-9_-]+)\.([a-z0-9_]*page)_(\d+)$/.exec(mk);
+        var pm = /^([a-z0-9_-]+)\.([a-z0-9_-]+)_(\d+)$/.exec(mk);
         if (!pm) continue;
         var e = map[mk];
         if (!e || e.type !== "link" || !e.href) continue;
+        var isPageField = /page$/.test(pm[2]);
+        if (!isPageField && String(e.href).charAt(0) !== "/") continue; // *page fields, or any internal link
         var hp = String(e.href).split(/[?#]/)[0].replace(/\/+$/, "").toLowerCase() || "/";
         if (hp !== here) continue;
 
