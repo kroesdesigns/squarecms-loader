@@ -1,4 +1,4 @@
-/* osCMS loader — v1 (runtime only; was "v58"). Build: __BUILD__
+/* osCMS loader — v1 (runtime only; was "v58"). Build: 9227089-20261027
  *
  * The live-site half of SquareCMS. Everything an editor needs now lives in
  * the SquareCMS Studio Chrome extension, so this file is just:
@@ -27,7 +27,7 @@
   var APP = "osCMS";
   var DATA_GLOBAL = "__osCMSData";
   var LOADER_VERSION = "1";          // one major line — every site loads @release and stays current
-  var LOADER_BUILD = "__BUILD__";    // replaced by the GitHub Action with the commit that built this file
+  var LOADER_BUILD = "9227089-20261027";    // replaced by the GitHub Action with the commit that built this file
   try { document.documentElement.setAttribute("data-oscms-loader", LOADER_VERSION); document.documentElement.setAttribute("data-oscms-build", LOADER_BUILD); } catch (eV) {}
   var MARKER_ID = "OSCMS:data";
   var MARKER_OPEN = "<!-- ==== " + MARKER_ID + " \u00b7 Site CMS Data ==== -->";
