@@ -1,6 +1,6 @@
 {
   "name": "squarecms-loader",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "SquareCMS runtime loader for Squarespace sites — swaps {{tags}} for CMS values.",
   "private": true,
   "scripts": {

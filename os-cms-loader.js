@@ -1,22 +1,29 @@
-/* osCMS loader — v1 (runtime only; was "v58"). Build: __BUILD__
+/* osCMS loader — v2 (runtime only). Build: __BUILD__
  *
- * The live-site half of SquareCMS. Everything an editor needs now lives in
- * the SquareCMS Studio Chrome extension, so this file is just:
+ * The live-site half of SquareCMS. Everything an editor needs lives in the
+ * SquareCMS Chrome extension, so this file is just:
  *
  *   01. Config & constants
  *   02. Shared helpers (slugify, normalization, tag map)
+ *   03. Replacement engine (text nodes + attributes, record/restore) —
+ *       works on any root, so a MutationObserver can hand it only what changed
+ *   04. LIVE SITE boot — two modes, same code:
+ *       · INSTANT (this script inline in the <head>, after the data block):
+ *         nodes are stamped as the parser adds them, before they paint.
+ *         No cloak, no flash, no network request.
+ *       · FOOTER (external <script defer src=…> in the footer, legacy):
+ *         one full pass, then incremental passes. Releases the header
+ *         cloak after the first pass that had data.
+ *       Public surface: window.osCMS { ready, refresh, version, build } and
+ *       the events oscms:stamped (per pass) and oscms:ready (once).
  *   04.5 Page views (data-oscms-view: values | highlight | tags) — set by Studio
- *   03. Replacement engine (text nodes + attributes, record/restore)
- *   04. LIVE SITE boot (immediate pass + MutationObserver + mercury:load)
  *   05. Editor gate (top-window /config check)
  *   06. EDITOR PREVIEW runtime — values from the Studio draft, raw tags +
  *       pill highlights in edit mode (the restore-before-serialize safety)
  *
- * Install (one line, every site, never changes):
- *   <script src="https://cdn.jsdelivr.net/gh/OWNER/REPO@release/os-cms-loader.min.js"></script>
- *
- * Data: the footer OSCMS:data block (window.__osCMSData), written by the
- * extension when you publish. v3–v57 data blocks all work unchanged.
+ * Data: the OSCMS:data block (window.__osCMSData), written by the extension
+ * when you publish — in the header for instant installs, in the footer for
+ * legacy ones. v3–v57 data blocks all work unchanged.
  */
 (function () {
   "use strict";
@@ -26,7 +33,9 @@
    * ================================================================== */
   var APP = "osCMS";
   var DATA_GLOBAL = "__osCMSData";
-  var LOADER_VERSION = "1";          // one major line — every site loads @release and stays current
+  var LOADER_VERSION = "2";          // bumped: incremental passes, instant mode, events
+  // A second copy (header inline + a leftover footer tag during migration) must not run twice.
+  if (window.osCMS && window.osCMS.booted) { return; }
   var LOADER_BUILD = "__BUILD__";    // replaced by the GitHub Action with the commit that built this file
   try { document.documentElement.setAttribute("data-oscms-loader", LOADER_VERSION); document.documentElement.setAttribute("data-oscms-build", LOADER_BUILD); } catch (eV) {}
   var MARKER_ID = "OSCMS:data";
@@ -301,7 +310,7 @@
     var textLog = []; // { node, original }
     var attrLog = []; // { el, attr, original }  (original null = attr was absent)
     var wrapLog = []; // { inserted: [nodes], original: textNode }
-    var seenText = typeof WeakSet !== "undefined" ? new WeakSet() : null;
+    var seenText = typeof WeakMap !== "undefined" ? new WeakMap() : null;
 
     var counts = {};
     var tidSeq = 0;
@@ -438,9 +447,19 @@
     function transformTextNode(node) {
       var s = node.nodeValue;
       if (!hasWrappableLink(s) || insideAnchor(node) || !node.parentNode) {
-        if (record && seenText && !seenText.has(node)) {
-          seenText.add(node);
-          textLog.push({ node: node, original: s });
+        if (record && seenText) {
+          var prior = seenText.get ? seenText.get(node) : null;
+          if (!prior) {
+            prior = { node: node, original: s, last: null };
+            seenText.set(node, prior);
+            textLog.push(prior);
+          } else if (prior.last != null && s.length > prior.last.length && s.indexOf(prior.last) === 0) {
+            // instant mode: the parser appended to a node we already swapped — extend the original
+            prior.original += s.slice(prior.last.length);
+          }
+          node.nodeValue = swapTokens(s);
+          prior.last = node.nodeValue;
+          return;
         }
         node.nodeValue = swapTokens(s);
         return;
@@ -574,12 +593,19 @@
       }
     }
 
+    /** querySelectorAll never returns the root itself; incremental passes hand us
+     *  single <img>/<a> elements, so include the root when it matches. */
+    function selfAndAll(scope, sel) {
+      var list = [].slice.call(scope.querySelectorAll(sel));
+      if (scope.nodeType === 1 && scope.matches && scope.matches(sel)) list.unshift(scope);
+      return list;
+    }
     function processAttributes(root) {
       var scope = root && root.querySelectorAll ? root : doc;
-      var imgs = scope.querySelectorAll("img");
+      var imgs = selfAndAll(scope, "img");
       for (var i = 0; i < imgs.length; i++) processImg(imgs[i]);
 
-      var sources = scope.querySelectorAll("source[srcset]");
+      var sources = selfAndAll(scope, "source[srcset]");
       for (var s = 0; s < sources.length; s++) {
         var dec = maybeDecode(sources[s].getAttribute("srcset"));
         if (dec.indexOf("{{") !== -1 && hasKnownTag(dec)) {
@@ -588,7 +614,14 @@
         }
       }
 
-      var links = scope.querySelectorAll("a[href]");
+      // <title> is a text node and already handled; meta description / og:* carry tags in `content`
+      var metas = selfAndAll(scope, "meta[content]");
+      for (var mi = 0; mi < metas.length; mi++) {
+        var mc = metas[mi].getAttribute("content");
+        if (mc && mc.indexOf("{{") !== -1 && hasKnownTag(mc)) { recordAttr(metas[mi], "content"); metas[mi].setAttribute("content", swapTokens(mc)); }
+      }
+
+      var links = selfAndAll(scope, "a[href]");
       for (var l = 0; l < links.length; l++) {
         var href = links[l].getAttribute("href");
         var decH = maybeDecode(href);
@@ -605,7 +638,15 @@
     }
 
     function processTextNodes(root) {
-      var base = root && root.nodeType === 1 ? root : doc.body;
+      if (root && root.nodeType === 3) {
+        // a characterData mutation handed us one text node
+        var pe = root.parentElement, tg = pe && pe.tagName;
+        if (!pe || tg === "SCRIPT" || tg === "STYLE" || tg === "NOSCRIPT" || tg === "TEXTAREA") return 0;
+        if (root.nodeValue.indexOf("{{") === -1 || !hasKnownTag(root.nodeValue)) return 0;
+        transformTextNode(root);
+        return 1;
+      }
+      var base = root && root.nodeType === 1 ? root : doc.body || doc.documentElement;
       if (!base) return 0;
       var walker = doc.createTreeWalker(base, NodeFilter.SHOW_TEXT, {
         acceptNode: function (node) {
@@ -665,18 +706,28 @@
       } catch (e) {}
     }
 
-    function run(root) {
+    /** One pass over `root` (an element, a text node, or nothing = whole document).
+     *  o.noRepeaters: skip <template data-oscms-each> — during parsing a template's
+     *  content may still be arriving, so repeaters stamp at DOMContentLoaded.
+     *  Returns the number of text nodes that changed. */
+    function run(root, o) {
+      var n = 0;
       try {
-        var scope = root && root.nodeType === 1 ? root : doc.body || doc;
-        expandRepeaters(scope);
-        rewritePageIndex(scope);
-        var n = processTextNodes(root);
-        processAttributes(root && root.nodeType === 1 ? root : doc);
-        processToggles(root && root.nodeType === 1 ? root : doc);
+        if (root && root.nodeType === 3) {
+          n = processTextNodes(root);
+        } else {
+          var scope = root && root.nodeType === 1 ? root : doc.body || doc.documentElement || doc;
+          if (!(o && o.noRepeaters)) expandRepeaters(scope);
+          rewritePageIndex(scope);
+          n = processTextNodes(root);
+          processAttributes(scope);
+          processToggles(scope);
+        }
         if (n) { statusCounts.replaced += n; log("replaced tags in " + n + " text node(s)"); }
       } catch (e) {
         log("replace failed:", e);
       }
+      return n;
     }
 
     /** Put every recorded original back (editor preview → edit mode). */
@@ -708,7 +759,7 @@
         } catch (e) {}
       }
       textLog = [];
-      seenText = typeof WeakSet !== "undefined" ? new WeakSet() : null;
+      seenText = typeof WeakMap !== "undefined" ? new WeakMap() : null;
       for (var j = attrLog.length - 1; j >= 0; j--) {
         var a = attrLog[j];
         try {
@@ -765,7 +816,8 @@
     return { setMap: setMap, run: run, restore: restore, getMap: function () { return map; }, valueSpots: valueSpots };
   }
 
-  /** Debounced observer that re-runs `fn` whenever Squarespace renders. */
+  /** Debounced whole-document observer — editor preview only (it needs full
+   *  re-syncs: draft changes, edit-mode flips, restore/re-run). */
   function observeRenders(doc, fn) {
     if (typeof MutationObserver === "undefined" || !doc.body) return null;
     var t = null;
@@ -774,6 +826,42 @@
       t = setTimeout(fn, 60);
     });
     mo.observe(doc.body, { childList: true, subtree: true, characterData: true });
+    return mo;
+  }
+
+  /** Incremental observer for the live site: collects the nodes each batch of
+   *  mutations actually added or changed and calls fn(roots) synchronously —
+   *  mutation callbacks run as microtasks, i.e. before the next paint, which is
+   *  what makes head-time stamping flash-free. Roots nested inside other roots
+   *  are dropped; an absurd batch falls back to one whole-document pass. */
+  function observeIncremental(target, fn) {
+    if (typeof MutationObserver === "undefined" || !target) return null;
+    var MAX_ROOTS = 400;
+    var mo = new MutationObserver(function (records) {
+      var roots = [], seen = typeof Set !== "undefined" ? new Set() : null;
+      function add(n) {
+        if (!n || (n.nodeType !== 1 && n.nodeType !== 3)) return;
+        if (seen) { if (seen.has(n)) return; seen.add(n); }
+        roots.push(n);
+      }
+      for (var r = 0; r < records.length && roots.length <= MAX_ROOTS; r++) {
+        var rec = records[r];
+        if (rec.type === "characterData") add(rec.target);
+        else if (rec.type === "childList") for (var a = 0; a < rec.addedNodes.length; a++) add(rec.addedNodes[a]);
+      }
+      if (!roots.length) return;
+      if (roots.length > MAX_ROOTS) { fn(null); return; }
+      // drop roots contained by another root in this batch
+      var top = [];
+      for (var i = 0; i < roots.length; i++) {
+        var n = roots[i], inside = false;
+        if (!n.isConnected) continue;
+        for (var j = 0; j < roots.length && !inside; j++) if (i !== j && roots[j].nodeType === 1 && roots[j] !== n && roots[j].contains(n)) inside = true;
+        if (!inside) top.push(n);
+      }
+      if (top.length) fn(top);
+    });
+    mo.observe(target, { childList: true, subtree: true, characterData: true });
     return mo;
   }
 
@@ -831,59 +919,95 @@
   }
 
   function bootLive() {
-    setTimeout(function () {
-      if (window.__osCMSInline) {
-        // Legacy inline runtime (pre-repeater, pre-URL-detection) from an
-        // older sync payload. The loader now owns the live site — proceed.
-        // Its replacements are consume-once, so overlap is harmless; the
-        // next sync writes a data-only block and it disappears entirely.
-        log("legacy inline runtime detected — loader taking over");
+    // INSTANT: the document is still parsing (we are inline in the header, or early in the
+    // body — a custom element in the header injection can close <head> early). Nodes get
+    // stamped as the parser adds them, before they paint. FOOTER: parsing is done (a defer
+    // tag, or a sync tag at the end of the body): one full pass, then incremental passes.
+    var parsing = document.readyState === "loading";
+    var replacer = createReplacer(document, { record: true });
+    var lastView = null, lastData = null, hasData = false, ready = false, dclDone = !parsing, firstFull = false;
+    var readyResolve, readyPromise = new Promise(function (res) { readyResolve = res; });
+    var api = window.osCMS = {
+      booted: true, version: LOADER_VERSION, build: LOADER_BUILD, mode: parsing ? "instant" : "footer",
+      ready: readyPromise, replaced: 0,
+      /** Re-stamp a subtree you built yourself (or the whole page). */
+      refresh: function (root) { pass(root && root.nodeType ? [root] : null, {}); }
+    };
+    try { document.documentElement.setAttribute("data-oscms-mode", api.mode); } catch (e0) {}
+
+    function emit(name, detail) {
+      try { document.dispatchEvent(new CustomEvent(name, { detail: detail })); } catch (e) {}
+    }
+    function releaseCloak() {
+      try { document.documentElement.classList.remove("oscms-cloak"); } catch (e) {}
+    }
+    /** Pick up the data block the first time it is seen — it may be parsed after us
+     *  (header order during an install, or a legacy footer block). */
+    function prepare() {
+      var data = window[DATA_GLOBAL];
+      if (!data) return false;
+      if (data !== lastData) {
+        lastData = data;
+        var liveMap = buildTagMap(data, location.pathname);
+        deriveIndexFromMap(liveMap);
+        replacer.setMap(liveMap);
+        hasData = true;
       }
-      var replacer = createReplacer(document, { record: true });
-      var lastView = null;
-      var run = function () {
-        var data = window[DATA_GLOBAL];
-        var view = pageView(document);
-        if (data) {
-          var liveMap = buildTagMap(data, location.pathname);
-          deriveIndexFromMap(liveMap);
-          replacer.setMap(liveMap);
-          if (view === "tags") {
-            // Studio asked for the source view: raw tags, color-coded
-            clearValueSpots(document);
-            replacer.restore();
-            injectHighlightStyles(document);
-            refreshHighlights(liveMap, document);
-          } else {
-            if (lastView === "tags") clearHighlights(document);
-            replacer.run();
-            if (view === "highlight") { injectHighlightStyles(document); paintValueSpots(document, replacer); }
-            else if (lastView === "highlight") clearValueSpots(document);
-          }
-          lastView = view;
-        }
-        stampStatus(document, "live", { hasData: !!data });
-        try {
-          document.documentElement.classList.remove("oscms-cloak");
-        } catch (e) {}
-      };
-      run();
-      observeView(document, run);
-      if (document.readyState === "loading") {
-        document.addEventListener("DOMContentLoaded", run, { once: true });
+      return true;
+    }
+    function finishReady() {
+      if (ready) return;
+      ready = true;
+      var detail = { hasData: hasData, replaced: statusCounts.replaced, index: window.APS_PAGE_INDEX || null, mode: api.mode };
+      stampStatus(document, "live", { hasData: hasData, ready: true });
+      emit("oscms:ready", detail);
+      readyResolve(detail);
+    }
+    /** roots: array of nodes for an incremental pass, null for the whole document. */
+    function pass(roots, o) {
+      var dataNow = prepare();
+      var view = pageView(document);
+      if (dataNow && view !== "values") {
+        // Studio's developer views always work on the whole page
+        if (view === "tags") { clearValueSpots(document); replacer.restore(); injectHighlightStyles(document); refreshHighlights(replacer.getMap(), document); }
+        else { if (lastView === "tags") clearHighlights(document); replacer.run(document.documentElement); injectHighlightStyles(document); paintValueSpots(document, replacer); }
+        lastView = view;
+        stampStatus(document, "live", { hasData: true });
+        releaseCloak();
+        return;
       }
-      window.addEventListener("load", run);
-      window.addEventListener("mercury:load", run);
-      if (document.body) observeRenders(document, run);
-      else
-        document.addEventListener(
-          "DOMContentLoaded",
-          function () {
-            observeRenders(document, run);
-          },
-          { once: true }
-        );
-    }, 0);
+      if (lastView && lastView !== "values") { if (lastView === "tags") clearHighlights(document); else clearValueSpots(document); }
+      lastView = view;
+      var n = 0;
+      if (dataNow) {
+        var opts = { noRepeaters: !!(o && o.noRepeaters) };
+        if (roots) { for (var i = 0; i < roots.length; i++) n += replacer.run(roots[i], opts); }
+        else { firstFull = true; n = replacer.run(document.documentElement, opts); } // whole document, <head> included (title, meta)
+        api.replaced = statusCounts.replaced;
+        if (n) emit("oscms:stamped", { replaced: n, total: statusCounts.replaced, partial: !!roots });
+      }
+      // The v1 cloak (legacy header block) lifts after the first pass WITH data, or at
+      // DOMContentLoaded regardless — a page never stays blank because of us.
+      if (dataNow || dclDone) releaseCloak();
+      if (!roots) stampStatus(document, "live", { hasData: dataNow });
+      if (dclDone && !roots) finishReady();
+    }
+
+    // 1. everything parsed so far (repeaters wait for DOMContentLoaded while parsing: a
+    //    <template> may still be filling when its start tag is observed)
+    if (prepare()) pass(null, { noRepeaters: parsing });
+    // 2. whatever the parser — or any script, forever — adds next, incrementally
+    observeIncremental(document.documentElement, function (roots) {
+      if (!hasData && !prepare()) return;                          // no data block yet — nothing to do
+      if (!firstFull) { pass(null, { noRepeaters: !dclDone }); return; } // first sight of data: catch up on the whole document
+      pass(roots, { noRepeaters: !dclDone });
+    });
+    // 3. one settling pass at DOMContentLoaded (repeaters, late data), then ready
+    if (dclDone) finishReady();
+    else document.addEventListener("DOMContentLoaded", function () { dclDone = true; pass(null, {}); }, { once: true });
+    observeView(document, function () { pass(null, {}); });
+    window.addEventListener("load", function () { pass(null, {}); });
+    window.addEventListener("mercury:load", function () { ready = false; pass(null, {}); });
   }
   /* ====================================================================
    * 04.5 Page views — driven by SquareCMS Studio through one attribute:
@@ -1259,6 +1383,6 @@
   /* ====================================================================
    * 08. Boot (editor) — preview only; no panel, no toolbar button
    * ================================================================== */
-  bootEditorPreview();
-  log("editor preview booted on", P.location.pathname);
+  if (P.body) { bootEditorPreview(); log("editor preview booted on", P.location.pathname); }
+  else P.addEventListener("DOMContentLoaded", function () { bootEditorPreview(); log("editor preview booted on", P.location.pathname); }, { once: true });
 })();
